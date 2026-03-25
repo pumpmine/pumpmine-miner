@@ -27,20 +27,23 @@ jobs:
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install cmake ninja python@3
-          echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $GITHUB_ENV
+        run: brew install cmake ninja python@3
 
       - name: Install deps (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: choco install cmake ninja python3 --yes --no-progress
 
+      # shaderc-sys 0.8.3 bundles an old CMakeLists that breaks on CMake 4.x
+      # This env var tells CMake to allow the old minimum version on all platforms
+      - name: Fix shaderc CMake compat
+        shell: bash
+        run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $GITHUB_ENV
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Cache cargo registry (shared across all runs)
       - uses: actions/cache@v4
         with:
           path: |
@@ -50,7 +53,6 @@ jobs:
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      # Cache build artifacts (per target, invalidated when src or deps change)
       - uses: actions/cache@v4
         with:
           path: target
