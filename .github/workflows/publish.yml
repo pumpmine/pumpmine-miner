@@ -12,10 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux x86_64,    os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  bin: pumpmine-miner,     out: pumpmine-miner-linux-x86_64       }
-          - { name: Windows x86_64,  os: windows-latest, target: x86_64-pc-windows-msvc,    bin: pumpmine-miner.exe, out: pumpmine-miner-windows-x86_64.exe }
-          - { name: macOS x86_64,    os: macos-13,       target: x86_64-apple-darwin,       bin: pumpmine-miner,     out: pumpmine-miner-macos-x86_64       }
-          - { name: macOS ARM64,     os: macos-latest,   target: aarch64-apple-darwin,      bin: pumpmine-miner,     out: pumpmine-miner-macos-arm64        }
+          - { name: Linux x86_64,   os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  bin: pumpmine-miner,     out: pumpmine-miner-linux-x86_64       }
+          - { name: Windows x86_64, os: windows-latest, target: x86_64-pc-windows-msvc,    bin: pumpmine-miner.exe, out: pumpmine-miner-windows-x86_64.exe }
+          - { name: macOS ARM64,    os: macos-latest,   target: aarch64-apple-darwin,      bin: pumpmine-miner,     out: pumpmine-miner-macos-arm64        }
 
     steps:
       - uses: actions/checkout@v4
@@ -74,28 +73,50 @@ jobs:
           path: dist/${{ matrix.out }}
           if-no-files-found: error
 
-  # Build a universal macOS binary (x86_64 + arm64 in one fat binary)
+  # Cross-compile x86_64 mac on the ARM runner, then lipo into a universal binary
   macos-universal:
     name: macOS Universal
-    needs: build
     runs-on: macos-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: x86_64-apple-darwin
-          path: x86_64
+      - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: aarch64-apple-darwin
-          path: arm64
+      - name: Install deps
+        run: brew install cmake ninja python@3
 
-      - name: Create universal binary
+      - name: Fix shaderc CMake compat
+        run: echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: build-macos-universal-${{ hashFiles('**/Cargo.lock', 'src/**') }}
+          restore-keys: build-macos-universal-
+
+      - name: Build arm64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Lipo universal binary
         run: |
           mkdir dist
           lipo -create \
-            x86_64/pumpmine-miner-macos-x86_64 \
-            arm64/pumpmine-miner-macos-arm64 \
+            target/aarch64-apple-darwin/release/pumpmine-miner \
+            target/x86_64-apple-darwin/release/pumpmine-miner \
             -output dist/pumpmine-miner-macos-universal
           lipo -info dist/pumpmine-miner-macos-universal
 
