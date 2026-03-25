@@ -1,421 +1,78 @@
-name: Build & Release
+name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (e.g. v1.0.0)"
-        required: true
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  # shaderc-sys will try to build from source if no prebuilt is found.
-  # Force source build so we don't depend on system glslc being the right version.
-  SHADERC_SKIP_ENV_CHECK: true
+    tags: ["v*.*.*"]
 
 jobs:
-  # ─────────────────────────────────────────────
-  # LINUX  –  native builds on multiple distros
-  # ─────────────────────────────────────────────
-  build-linux:
-    name: Linux (${{ matrix.target }}) on ${{ matrix.container }}
-    runs-on: ubuntu-latest
-    container: ${{ matrix.container }}
-
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── Debian / Ubuntu ──────────────────────────────────────────────
-          - {
-              container: "ubuntu:22.04",
-              target: x86_64-unknown-linux-gnu,
-              suffix: ubuntu22-x86_64,
-            }
-          - {
-              container: "ubuntu:24.04",
-              target: x86_64-unknown-linux-gnu,
-              suffix: ubuntu24-x86_64,
-            }
-          - {
-              container: "debian:12",
-              target: x86_64-unknown-linux-gnu,
-              suffix: debian12-x86_64,
-            }
-          - {
-              container: "debian:11",
-              target: x86_64-unknown-linux-gnu,
-              suffix: debian11-x86_64,
-            }
-
-          # ── Fedora / RHEL family ─────────────────────────────────────────
-          - {
-              container: "fedora:40",
-              target: x86_64-unknown-linux-gnu,
-              suffix: fedora40-x86_64,
-            }
-          - {
-              container: "rockylinux:9",
-              target: x86_64-unknown-linux-gnu,
-              suffix: rocky9-x86_64,
-            }
-          - {
-              container: "almalinux:9",
-              target: x86_64-unknown-linux-gnu,
-              suffix: alma9-x86_64,
-            }
-
-          # ── Arch ─────────────────────────────────────────────────────────
-          - {
-              container: "archlinux:latest",
-              target: x86_64-unknown-linux-gnu,
-              suffix: arch-x86_64,
-            }
-
-          # ── Alpine (musl) ─────────────────────────────────────────────────
-          - {
-              container: "alpine:3.19",
-              target: x86_64-unknown-linux-musl,
-              suffix: alpine-x86_64-musl,
-            }
-
-          # ── OpenSUSE Leap ─────────────────────────────────────────────────
-          - {
-              container: "opensuse/leap:15.5",
-              target: x86_64-unknown-linux-gnu,
-              suffix: opensuse15-x86_64,
-            }
-
-    steps:
-      - name: Install git (needed for checkout in containers)
-        run: |
-          case "${{ matrix.container }}" in
-            ubuntu*|debian*)
-              apt-get update -qq && apt-get install -y --no-install-recommends git ;;
-            fedora*)
-              dnf install -y git ;;
-            rocky*|alma*)
-              dnf install -y git ;;
-            archlinux*)
-              pacman -Sy --noconfirm git ;;
-            alpine*)
-              apk add --no-cache git ;;
-            opensuse*)
-              zypper install -y git ;;
-          esac
-
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          case "${{ matrix.container }}" in
-            ubuntu*|debian*)
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y --no-install-recommends \
-                curl build-essential cmake python3 libvulkan-dev \
-                libx11-dev libxcb1-dev libwayland-dev pkg-config \
-                ca-certificates ninja-build ;;
-
-            fedora*)
-              dnf install -y \
-                curl gcc gcc-c++ cmake python3 vulkan-devel \
-                libX11-devel libxcb-devel wayland-devel pkg-config \
-                ca-certificates ninja-build ;;
-
-            rocky*|alma*)
-              dnf install -y epel-release
-              dnf install -y \
-                curl gcc gcc-c++ cmake python3 vulkan-devel \
-                libX11-devel libxcb-devel wayland-devel pkg-config \
-                ca-certificates ninja-build ;;
-
-            archlinux*)
-              pacman -Sy --noconfirm \
-                curl base-devel cmake python vulkan-headers vulkan-icd-loader \
-                libx11 libxcb wayland pkg-config ca-certificates ninja ;;
-
-            alpine*)
-              apk add --no-cache \
-                curl build-base cmake python3 vulkan-loader-dev \
-                libx11-dev libxcb-dev wayland-dev pkgconfig \
-                ca-certificates ninja musl-dev ;;
-
-            opensuse*)
-              zypper install -y \
-                curl gcc gcc-c++ cmake python3 vulkan-devel \
-                libX11-devel libxcb-devel wayland-devel pkg-config \
-                ca-certificates ninja ;;
-          esac
-
-      - name: Install Rust toolchain
-        run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Add target (musl needs explicit addition)
-        run: |
-          $HOME/.cargo/bin/rustup target add ${{ matrix.target }}
-
-      - name: Cache cargo registry + build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ matrix.suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.suffix }}-cargo-
-
-      - name: Build (release)
-        run: |
-          $HOME/.cargo/bin/cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
-        shell: bash
-        run: |
-          mkdir -p dist
-          # Adjust binary name to your actual binary
-          BIN=$(cargo metadata --no-deps --format-version 1 | python3 -c "
-          import json,sys
-          m=json.load(sys.stdin)
-          bins=[t['name'] for p in m['packages'] for t in p['targets'] if 'bin' in t['kind']]
-          print(bins[0])
-          " 2>/dev/null || echo "app")
-          cp target/${{ matrix.target }}/release/$BIN \
-             dist/${BIN}-${{ matrix.suffix }} 2>/dev/null || \
-          cp target/${{ matrix.target }}/release/${BIN} \
-             dist/${BIN}-${{ matrix.suffix }} || true
-          ls dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bin-${{ matrix.suffix }}
-          path: dist/
-          if-no-files-found: error
-
-  # ─────────────────────────────────────────────
-  # WINDOWS  –  x86_64 and aarch64
-  # ─────────────────────────────────────────────
-  build-windows:
-    name: Windows (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {
-              runner: windows-latest,
-              target: x86_64-pc-windows-msvc,
-              suffix: windows-x86_64,
-            }
-          - {
-              runner: windows-11-arm,
-              target: aarch64-pc-windows-msvc,
-              suffix: windows-arm64,
-            }
+          - { name: Linux x86_64,   os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  ext: ""     }
+          - { name: Windows x86_64, os: windows-latest, target: x86_64-pc-windows-msvc,    ext: ".exe" }
+          - { name: macOS x86_64,   os: macos-13,       target: x86_64-apple-darwin,       ext: ""     }
+          - { name: macOS ARM64,    os: macos-latest,   target: aarch64-apple-darwin,      ext: ""     }
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake ninja-build python3 libvulkan-dev
 
-      - name: Install Vulkan SDK
-        # shaderc needs the Vulkan SDK headers / glslang on Windows
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja python@3
+
+      - name: Install Vulkan SDK (Windows + macOS)
+        if: runner.os != 'Linux'
         uses: humbletim/install-vulkan-sdk@v1.1.1
         with:
           version: latest
           cache: true
 
-      - name: Install Python (needed by shaderc build scripts)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Install CMake & Ninja
-        uses: lukka/get-cmake@latest
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\.cargo\registry\index
-            ~\.cargo\registry\cache
-            ~\.cargo\git\db
-            target
-          key: ${{ matrix.suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.suffix }}-cargo-
-
-      - name: Build (release)
-        shell: pwsh
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          $bin = (cargo metadata --no-deps --format-version 1 | python -c `
-            "import json,sys; m=json.load(sys.stdin); bins=[t['name'] for p in m['packages'] for t in p['targets'] if 'bin' in t['kind']]; print(bins[0])" `
-            2>$null) -replace '\s',''
-          if (-not $bin) { $bin = "app" }
-          Copy-Item "target\${{ matrix.target }}\release\$bin.exe" `
-                    "dist\$bin-${{ matrix.suffix }}.exe"
-          Get-ChildItem dist
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bin-${{ matrix.suffix }}
-          path: dist/
-          if-no-files-found: error
-
-  # ─────────────────────────────────────────────
-  # MACOS  –  Intel and Apple Silicon
-  # ─────────────────────────────────────────────
-  build-macos:
-    name: macOS (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {
-              runner: macos-13,
-              target: x86_64-apple-darwin,
-              suffix: macos-x86_64,
-            }
-          - {
-              runner: macos-latest,
-              target: aarch64-apple-darwin,
-              suffix: macos-arm64,
-            }
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies via Homebrew
-        run: |
-          brew install cmake ninja python@3 molten-vk
-
-      - name: Install Vulkan SDK (MoltenVK headers + shaderc)
-        # Provides libshaderc + glslang headers on macOS
-        uses: humbletim/install-vulkan-sdk@v1.1.1
-        with:
-          version: latest
-          cache: true
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
+            ~/.cargo/registry
+            ~/.cargo/git
             target
-          key: ${{ matrix.suffix }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.suffix }}-cargo-
+          key: ${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build (release)
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
-        shell: bash
-        run: |
-          mkdir -p dist
-          BIN=$(cargo metadata --no-deps --format-version 1 | python3 -c "
-          import json,sys
-          m=json.load(sys.stdin)
-          bins=[t['name'] for p in m['packages'] for t in p['targets'] if 'bin' in t['kind']]
-          print(bins[0])
-          " 2>/dev/null || echo "app")
-          cp target/${{ matrix.target }}/release/$BIN dist/${BIN}-${{ matrix.suffix }}
-          ls dist/
-
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.suffix }}
-          path: dist/
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/*${{ matrix.ext }}
           if-no-files-found: error
 
-  # ─────────────────────────────────────────────
-  # RELEASE  –  collect all artifacts and publish
-  # ─────────────────────────────────────────────
   release:
-    name: Publish GitHub Release
-    needs: [build-linux, build-windows, build-macos]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write # required to create releases and upload assets
-
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: release-artifacts
-          pattern: bin-*
+          path: artifacts
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lh release-artifacts/
-
-      - name: Determine tag
-        id: tag
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Generate changelog snippet
-        id: changelog
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          echo "## Release ${TAG}" > changelog.md
-          echo "" >> changelog.md
-          echo "### Platforms" >> changelog.md
-          echo "| File | Platform |" >> changelog.md
-          echo "|------|----------|" >> changelog.md
-          for f in release-artifacts/*; do
-            name=$(basename "$f")
-            echo "| \`${name}\` | auto-detected |" >> changelog.md
-          done
-          cat changelog.md
-          # Export multiline for the release body
-          {
-            echo 'body<<EOF'
-            cat changelog.md
-            echo EOF
-          } >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release & upload assets
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: Release ${{ steps.tag.outputs.tag }}
-          body: ${{ steps.changelog.outputs.body }}
-          draft: false
-          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }} # alpha/beta tags → prerelease
-          files: release-artifacts/*
-          generate_release_notes: true # appends GH auto-notes on top of our body
+          files: artifacts/**
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
