@@ -14,7 +14,6 @@ jobs:
         include:
           - { name: Linux x86_64,   os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  ext: ""     }
           - { name: Windows x86_64, os: windows-latest, target: x86_64-pc-windows-msvc,    ext: ".exe" }
-          - { name: macOS x86_64,   os: macos-13,       target: x86_64-apple-darwin,       ext: ""     }
           - { name: macOS ARM64,    os: macos-latest,   target: aarch64-apple-darwin,      ext: ""     }
 
     steps:
@@ -35,10 +34,19 @@ jobs:
         uses: humbletim/install-vulkan-sdk@v1.1.1
         with:
           version: latest
+          cache: false   # disable built-in cache — it uses deprecated actions/cache@v2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
