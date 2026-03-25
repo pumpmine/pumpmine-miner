@@ -28,19 +28,28 @@ jobs:
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install cmake ninja python@3 glslang shaderc
+          brew install cmake ninja python@3
+          # shaderc-sys 0.8.3 ships an old CMakeLists that breaks on CMake 4.x
+          echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $GITHUB_ENV
 
       - name: Install deps (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install cmake ninja python3 --yes
-          # Install glslang + shaderc via winget or grab prebuilt shaderc
-          $url = "https://storage.googleapis.com/shaderc/artifacts/prod/graphics_shader_compiler/shaderc/windows/continuous_release_2017/407/20240105-094918/install.zip"
-          Invoke-WebRequest $url -OutFile shaderc.zip
-          Expand-Archive shaderc.zip -DestinationPath C:\shaderc
-          echo "SHADERC_LIB_DIR=C:\shaderc\lib" >> $env:GITHUB_ENV
-          echo "C:\shaderc\bin" >> $env:GITHUB_PATH
+          # Install build tools
+          choco install cmake ninja python3 --yes --no-progress
+          refreshenv
+
+          # Download prebuilt shaderc from LunarG Vulkan SDK (reliable source)
+          $ver = "1.3.290.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$ver/windows/VulkanSDK-$ver-Installer.exe"
+          Write-Host "Downloading Vulkan SDK $ver..."
+          Invoke-WebRequest $url -OutFile VulkanSDK.exe
+          Start-Process -FilePath VulkanSDK.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+          $sdkPath = "C:\VulkanSDK\$ver"
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          echo "SHADERC_LIB_DIR=$sdkPath\Lib" >> $env:GITHUB_ENV
+          echo "$sdkPath\Bin" >> $env:GITHUB_PATH
 
       - uses: dtolnay/rust-toolchain@stable
         with:
