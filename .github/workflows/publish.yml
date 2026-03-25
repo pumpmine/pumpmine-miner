@@ -18,11 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux builds
+          # Linux (native)
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             use-cross: false
 
+          # Linux ARM (cross)
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             use-cross: true
@@ -43,29 +44,73 @@ jobs:
             use-cross: false
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
+
+      # ---------------------------
+      # Install shaderc dependencies
+      # ---------------------------
+
+      - name: Install shaderc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libshaderc-dev
+
+      - name: Install shaderc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install shaderc
+
+      - name: Install shaderc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install shaderc -y
+
+      # ---------------------------
+      # Rust toolchain
+      # ---------------------------
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross (if needed)
+      # ---------------------------
+      # Cross (for ARM Linux)
+      # ---------------------------
+
+      - name: Install cross
         if: matrix.use-cross == true
         run: cargo install cross
 
-      - name: Build project
+      # ---------------------------
+      # Build
+      # ---------------------------
+
+      - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-        shell: bash
 
-      - name: Prepare binary
-        id: prep
+      # ---------------------------
+      # Prepare artifact
+      # ---------------------------
+
+      - name: Package binary
+        id: package
+        shell: bash
         run: |
           APP_NAME=$(basename $(pwd))
 
@@ -75,11 +120,20 @@ jobs:
             BIN_NAME="${APP_NAME}"
           fi
 
-          mkdir dist
+          mkdir -p dist
+
           cp target/${{ matrix.target }}/release/$BIN_NAME dist/
 
-          echo "bin_name=$BIN_NAME" >> $GITHUB_OUTPUT
-        shell: bash
+          # Optional: strip (ignore errors on unsupported platforms)
+          strip dist/$BIN_NAME || true
+
+          ARCHIVE_NAME="${APP_NAME}-${{ matrix.target }}"
+
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            zip -j dist/${ARCHIVE_NAME}.zip dist/$BIN_NAME
+          else
+            tar -czf dist/${ARCHIVE_NAME}.tar.gz -C dist $BIN_NAME
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -88,7 +142,7 @@ jobs:
           path: dist/*
 
   release:
-    name: Create Release
+    name: Release
     needs: build
     runs-on: ubuntu-latest
 
@@ -98,7 +152,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
