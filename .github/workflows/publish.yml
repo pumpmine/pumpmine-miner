@@ -18,17 +18,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux (native)
+          # Linux x86_64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             use-cross: false
 
-          # Linux ARM (cross)
+          # Linux ARM
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             use-cross: true
 
-          # Windows
+          # Windows (DO NOT TOUCH shaderc here)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
@@ -38,7 +38,7 @@ jobs:
             target: x86_64-apple-darwin
             use-cross: false
 
-          # macOS Apple Silicon
+          # macOS ARM
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
@@ -48,31 +48,37 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------
-      # Install shaderc dependencies
+      # Install shaderc (Linux + macOS ONLY)
       # ---------------------------
 
-      - name: Install shaderc (Linux)
+      - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
+            git \
             cmake \
             ninja-build \
-            pkg-config \
-            libshaderc-dev
+            build-essential \
+            python3
 
-      - name: Install shaderc (macOS)
-        if: runner.os == 'macOS'
+      - name: Build shaderc (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
-          brew update
-          brew install shaderc
+          git clone https://github.com/google/shaderc.git
+          cd shaderc
 
-      - name: Install shaderc (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install shaderc -y
+          ./utils/git-sync-deps
+
+          mkdir build
+          cd build
+
+          cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
+          ninja
+
+          echo "SHADERC_LIB_DIR=$PWD/libshaderc" >> $GITHUB_ENV
+          echo "SHADERC_INCLUDE_DIR=$(pwd)/../libshaderc/include" >> $GITHUB_ENV
 
       # ---------------------------
       # Rust toolchain
@@ -84,7 +90,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       # ---------------------------
-      # Cross (for ARM Linux)
+      # Cross (Linux ARM only)
       # ---------------------------
 
       - name: Install cross
@@ -105,11 +111,10 @@ jobs:
           fi
 
       # ---------------------------
-      # Prepare artifact
+      # Package
       # ---------------------------
 
       - name: Package binary
-        id: package
         shell: bash
         run: |
           APP_NAME=$(basename $(pwd))
@@ -121,18 +126,16 @@ jobs:
           fi
 
           mkdir -p dist
-
           cp target/${{ matrix.target }}/release/$BIN_NAME dist/
 
-          # Optional: strip (ignore errors on unsupported platforms)
           strip dist/$BIN_NAME || true
 
-          ARCHIVE_NAME="${APP_NAME}-${{ matrix.target }}"
+          ARCHIVE="${APP_NAME}-${{ matrix.target }}"
 
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            zip -j dist/${ARCHIVE_NAME}.zip dist/$BIN_NAME
+            powershell Compress-Archive dist/$BIN_NAME dist/$ARCHIVE.zip
           else
-            tar -czf dist/${ARCHIVE_NAME}.tar.gz -C dist $BIN_NAME
+            tar -czf dist/$ARCHIVE.tar.gz -C dist $BIN_NAME
           fi
 
       - name: Upload artifact
@@ -152,7 +155,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
