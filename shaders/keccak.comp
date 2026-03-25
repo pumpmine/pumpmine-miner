@@ -1,0 +1,469 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ── Push constants ────────────────────────────────────────────────────────────
+// All fields are individual u32 scalars (no arrays) to avoid std430 padding.
+// challenge[32] as 8 BE u32s, sender[20] as 5 BE u32s, target[32] as 8 BE u32s.
+layout(push_constant) uniform PC {
+    uint ch0;
+    uint ch1;
+    uint ch2;
+    uint ch3;
+    uint ch4;
+    uint ch5;
+    uint ch6;
+    uint ch7;
+    uint sn0;
+    uint sn1;
+    uint sn2;
+    uint sn3;
+    uint sn4;
+    uint base_lo;
+    uint base_hi;
+    uint tg0;
+    uint tg1;
+    uint tg2;
+    uint tg3;
+    uint tg4;
+    uint tg5;
+    uint tg6;
+    uint tg7;
+} pc;
+
+layout(std430, set = 0, binding = 0) buffer Res {
+    uint found;
+    uint nonce_lo;
+    uint nonce_hi;
+    uint d[8]; // Using an array is fine in std430 for d0..d7
+};
+
+// Correct Keccak-f[1600] constants for split u32 (Little-Endian words)
+const uint RC_LO[24] = uint[24](
+        0x00000001u, 0x00008082u, 0x0000808Au, 0x80008000u,
+        0x0000808Bu, 0x80000001u, 0x80008081u, 0x00008009u,
+        0x0000008Au, 0x00000088u, 0x80008009u, 0x8000000Au,
+        0x8000808Bu, 0x0000008Bu, 0x00008089u, 0x00008003u,
+        0x00008002u, 0x00000080u, 0x0000800Au, 0x8000000Au,
+        0x80008081u, 0x00008080u, 0x80000001u, 0x80008008u
+    );
+
+const uint RC_HI[24] = uint[24](
+        0x00000000u, 0x00000000u, 0x80000000u, 0x80000000u,
+        0x00000000u, 0x00000000u, 0x80000000u, 0x80000000u, // Index 7 was 0
+        0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        0x00000000u, 0x80000000u, 0x80000000u, 0x80000000u, // Index 13, 14, 15 were 0
+        0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u, // Index 16, 17 were 0
+        0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u // Index 22 was 0x80000001
+    );
+
+// ── 64-bit rotate via split lo/hi u32 pair ───────────────────────────────────
+// A 64-bit lane is stored as two u32: (lo = bits[31:0], hi = bits[63:32]).
+// ROT64_LEFT(n): new_lo = old bits [63-n+1 .. 0] ++ old bits [63 .. 64-n]
+//   for n < 32:  new_lo = (lo << n) | (hi >> (32-n))
+//                new_hi = (hi << n) | (lo >> (32-n))
+//   for n == 32: swap lo/hi
+//   for n > 32:  same as n-32 but with lo/hi swapped first
+uint rlo(uint lo, uint hi, uint n) {
+    if (n == 0u) return lo;
+    if (n == 32u) return hi;
+    if (n < 32u) return (lo << n) | (hi >> (32u - n));
+    n -= 32u;
+    return (hi << n) | (lo >> (32u - n));
+}
+uint rhi(uint lo, uint hi, uint n) {
+    if (n == 0u) return hi;
+    if (n == 32u) return lo;
+    if (n < 32u) return (hi << n) | (lo >> (32u - n));
+    n -= 32u;
+    return (lo << n) | (hi >> (32u - n));
+}
+
+// ── Byte-swap u32 (convert BE push-constant word to LE lane word) ─────────────
+uint bs(uint x) {
+    return ((x & 0xFFu) << 24u) | ((x & 0xFF00u) << 8u)
+        | ((x >> 8u) & 0xFF00u) | ((x >> 24u) & 0xFFu);
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+void main() {
+    // Early exit if another thread already found a solution.
+    if (found != 0u) return;
+
+    uint gid = gl_GlobalInvocationID.x;
+
+    // 64-bit nonce = base + gid (with carry)
+    uint nlo = pc.base_lo + gid;
+    uint nhi = pc.base_hi + (nlo < pc.base_lo ? 1u : 0u);
+
+    // ── Absorb: build Keccak state from the 84-byte message + padding ─────────
+    //
+    // Message layout (84 bytes):
+    //   [  0.. 31] challenge (32 bytes)
+    //   [ 32.. 51] sender    (20 bytes)
+    //   [ 52.. 75] zero pad  (24 bytes)  ← nonce high 192 bits = 0
+    //   [ 76.. 79] nhi as BE u32
+    //   [ 80.. 83] nlo as BE u32
+    //
+    // Keccak-256 rate = 136 bytes = 17 lanes of 8 bytes each.
+    // Padding: byte[84]=0x01, bytes[85..134]=0x00, byte[135]=0x80.
+    //
+    // Each lane k covers bytes [8k .. 8k+7] in little-endian order:
+    //   lo word = bytes [8k+0 .. 8k+3], byte 8k is LSB
+    //   hi word = bytes [8k+4 .. 8k+7], byte 8k+4 is LSB
+    //
+    // push-constant words are big-endian u32 (network order), so bs() converts.
+    //
+    // Lane-by-lane breakdown:
+    //  lane 0  [0..7]   = ch[0..7]   → lo=bs(ch0), hi=bs(ch1)
+    //  lane 1  [8..15]  = ch[8..15]  → lo=bs(ch2), hi=bs(ch3)
+    //  lane 2  [16..23] = ch[16..23] → lo=bs(ch4), hi=bs(ch5)
+    //  lane 3  [24..31] = ch[24..31] → lo=bs(ch6), hi=bs(ch7)
+    //  lane 4  [32..39] = sn[0..7]   → lo=bs(sn0), hi=bs(sn1)
+    //  lane 5  [40..47] = sn[8..15]  → lo=bs(sn2), hi=bs(sn3)
+    //  lane 6  [48..55] = sn[16..19] ++ 0x00000000
+    //                                → lo=bs(sn4), hi=0
+    //  lane 7  [56..63] = 0          → 0, 0
+    //  lane 8  [64..71] = 0          → 0, 0
+    //  lane 9  [72..79] = 0x00000000 ++ nhi_BE
+    //                                → lo=0, hi=bs(nhi)
+    //  lane 10 [80..87] = nlo_BE ++ 0x01 ++ 0x00 ++ 0x00 ++ 0x00
+    //                                → lo=bs(nlo), hi=0x00000001
+    //  lanes 11-15: zero
+    //  lane 16 [128..135] = 0x00 ++ 0x00 ++ 0x00 ++ 0x00 ++ 0x00 ++ 0x00 ++ 0x00 ++ 0x80
+    //                                → lo=0, hi=0x80000000
+    //  lanes 17-24: zero (outside rate, never written)
+
+    // State as 25 scalar pairs (index = x + 5*y).
+    // Named s0lo/s0hi .. s24lo/s24hi to avoid any array indirection.
+    uint s0lo = bs(pc.ch0);
+    uint s0hi = bs(pc.ch1);
+    uint s1lo = bs(pc.ch2);
+    uint s1hi = bs(pc.ch3);
+    uint s2lo = bs(pc.ch4);
+    uint s2hi = bs(pc.ch5);
+    uint s3lo = bs(pc.ch6);
+    uint s3hi = bs(pc.ch7);
+    uint s4lo = bs(pc.sn0);
+    uint s4hi = bs(pc.sn1);
+    uint s5lo = bs(pc.sn2);
+    uint s5hi = bs(pc.sn3);
+    uint s6lo = bs(pc.sn4);
+    uint s6hi = 0u;
+    uint s7lo = 0u;
+    uint s7hi = 0u;
+    uint s8lo = 0u;
+    uint s8hi = 0u;
+    uint s9lo = 0u;
+    uint s9hi = bs(nhi);
+    uint s10lo = bs(nlo);
+    uint s10hi = 0x00000001u;
+    uint s11lo = 0u;
+    uint s11hi = 0u;
+    uint s12lo = 0u;
+    uint s12hi = 0u;
+    uint s13lo = 0u;
+    uint s13hi = 0u;
+    uint s14lo = 0u;
+    uint s14hi = 0u;
+    uint s15lo = 0u;
+    uint s15hi = 0u;
+    uint s16lo = 0u;
+    uint s16hi = 0x80000000u;
+    uint s17lo = 0u;
+    uint s17hi = 0u;
+    uint s18lo = 0u;
+    uint s18hi = 0u;
+    uint s19lo = 0u;
+    uint s19hi = 0u;
+    uint s20lo = 0u;
+    uint s20hi = 0u;
+    uint s21lo = 0u;
+    uint s21hi = 0u;
+    uint s22lo = 0u;
+    uint s22hi = 0u;
+    uint s23lo = 0u;
+    uint s23hi = 0u;
+    uint s24lo = 0u;
+    uint s24hi = 0u;
+
+    // ── keccak-f[1600]: 24 rounds, fully inlined ──────────────────────────────
+    // Temporaries for theta/rho+pi
+    uint c0l, c0h, c1l, c1h, c2l, c2h, c3l, c3h, c4l, c4h;
+    uint d0l, d0h, d1l, d1h, d2l, d2h, d3l, d3h, d4l, d4h;
+    // B array for rho+pi output (scalar, no array)
+    uint b0lo, b0hi, b1lo, b1hi, b2lo, b2hi, b3lo, b3hi, b4lo, b4hi;
+    uint b5lo, b5hi, b6lo, b6hi, b7lo, b7hi, b8lo, b8hi, b9lo, b9hi;
+    uint b10lo, b10hi, b11lo, b11hi, b12lo, b12hi, b13lo, b13hi, b14lo, b14hi;
+    uint b15lo, b15hi, b16lo, b16hi, b17lo, b17hi, b18lo, b18hi, b19lo, b19hi;
+    uint b20lo, b20hi, b21lo, b21hi, b22lo, b22hi, b23lo, b23hi, b24lo, b24hi;
+
+    for (int r = 0; r < 24; ++r) {
+
+        // ── θ step ────────────────────────────────────────────────────────────
+        // C[x] = XOR of column x across all 5 rows
+        c0l = s0lo ^ s5lo ^ s10lo ^ s15lo ^ s20lo;
+        c0h = s0hi ^ s5hi ^ s10hi ^ s15hi ^ s20hi;
+        c1l = s1lo ^ s6lo ^ s11lo ^ s16lo ^ s21lo;
+        c1h = s1hi ^ s6hi ^ s11hi ^ s16hi ^ s21hi;
+        c2l = s2lo ^ s7lo ^ s12lo ^ s17lo ^ s22lo;
+        c2h = s2hi ^ s7hi ^ s12hi ^ s17hi ^ s22hi;
+        c3l = s3lo ^ s8lo ^ s13lo ^ s18lo ^ s23lo;
+        c3h = s3hi ^ s8hi ^ s13hi ^ s18hi ^ s23hi;
+        c4l = s4lo ^ s9lo ^ s14lo ^ s19lo ^ s24lo;
+        c4h = s4hi ^ s9hi ^ s14hi ^ s19hi ^ s24hi;
+
+        // D[x] = C[x-1] xor ROT(C[x+1], 1)
+        d0l = c4l ^ rlo(c1l, c1h, 1u);
+        d0h = c4h ^ rhi(c1l, c1h, 1u);
+        d1l = c0l ^ rlo(c2l, c2h, 1u);
+        d1h = c0h ^ rhi(c2l, c2h, 1u);
+        d2l = c1l ^ rlo(c3l, c3h, 1u);
+        d2h = c1h ^ rhi(c3l, c3h, 1u);
+        d3l = c2l ^ rlo(c4l, c4h, 1u);
+        d3h = c2h ^ rhi(c4l, c4h, 1u);
+        d4l = c3l ^ rlo(c0l, c0h, 1u);
+        d4h = c3h ^ rhi(c0l, c0h, 1u);
+
+        // A[x,y] ^= D[x]  — fully explicit, zero dynamic indexing
+        s0lo ^= d0l;
+        s0hi ^= d0h;
+        s1lo ^= d1l;
+        s1hi ^= d1h;
+        s2lo ^= d2l;
+        s2hi ^= d2h;
+        s3lo ^= d3l;
+        s3hi ^= d3h;
+        s4lo ^= d4l;
+        s4hi ^= d4h;
+        s5lo ^= d0l;
+        s5hi ^= d0h;
+        s6lo ^= d1l;
+        s6hi ^= d1h;
+        s7lo ^= d2l;
+        s7hi ^= d2h;
+        s8lo ^= d3l;
+        s8hi ^= d3h;
+        s9lo ^= d4l;
+        s9hi ^= d4h;
+        s10lo ^= d0l;
+        s10hi ^= d0h;
+        s11lo ^= d1l;
+        s11hi ^= d1h;
+        s12lo ^= d2l;
+        s12hi ^= d2h;
+        s13lo ^= d3l;
+        s13hi ^= d3h;
+        s14lo ^= d4l;
+        s14hi ^= d4h;
+        s15lo ^= d0l;
+        s15hi ^= d0h;
+        s16lo ^= d1l;
+        s16hi ^= d1h;
+        s17lo ^= d2l;
+        s17hi ^= d2h;
+        s18lo ^= d3l;
+        s18hi ^= d3h;
+        s19lo ^= d4l;
+        s19hi ^= d4h;
+        s20lo ^= d0l;
+        s20hi ^= d0h;
+        s21lo ^= d1l;
+        s21hi ^= d1h;
+        s22lo ^= d2l;
+        s22hi ^= d2h;
+        s23lo ^= d3l;
+        s23hi ^= d3h;
+        s24lo ^= d4l;
+        s24hi ^= d4h;
+
+        // ── ρ + π step ────────────────────────────────────────────────────────
+        // B[pi(x,y)] = ROT(A[x,y], rho(x,y))
+        // pi mapping:  new_flat = y + 5*((2x+3y) mod 5)
+        // rho offsets: standard Keccak spec table
+        //
+        // src | (x,y) | dst | rot
+        //   0 | (0,0) |   0 |  0
+        //   1 | (1,0) |  10 |  1
+        //   2 | (2,0) |  20 | 62
+        //   3 | (3,0) |   5 | 28
+        //   4 | (4,0) |  15 | 27
+        //   5 | (0,1) |  16 | 36
+        //   6 | (1,1) |   1 | 44
+        //   7 | (2,1) |  11 |  6
+        //   8 | (3,1) |  21 | 55
+        //   9 | (4,1) |   6 | 20
+        //  10 | (0,2) |   7 |  3
+        //  11 | (1,2) |  17 | 10
+        //  12 | (2,2) |   2 | 43
+        //  13 | (3,2) |  12 | 25
+        //  14 | (4,2) |  22 | 39
+        //  15 | (0,3) |  23 | 41
+        //  16 | (1,3) |   8 | 45
+        //  17 | (2,3) |  18 | 15
+        //  18 | (3,3) |   3 | 21
+        //  19 | (4,3) |  13 |  8
+        //  20 | (0,4) |  14 | 18
+        //  21 | (1,4) |  24 |  2
+        //  22 | (2,4) |   9 | 61
+        //  23 | (3,4) |  19 | 56
+        //  24 | (4,4) |   4 | 14
+        b0lo = rlo(s0lo, s0hi, 0u);
+        b0hi = rhi(s0lo, s0hi, 0u);
+        b10lo = rlo(s1lo, s1hi, 1u);
+        b10hi = rhi(s1lo, s1hi, 1u);
+        b20lo = rlo(s2lo, s2hi, 62u);
+        b20hi = rhi(s2lo, s2hi, 62u);
+        b5lo = rlo(s3lo, s3hi, 28u);
+        b5hi = rhi(s3lo, s3hi, 28u);
+        b15lo = rlo(s4lo, s4hi, 27u);
+        b15hi = rhi(s4lo, s4hi, 27u);
+
+        b16lo = rlo(s5lo, s5hi, 36u);
+        b16hi = rhi(s5lo, s5hi, 36u);
+        b1lo = rlo(s6lo, s6hi, 44u);
+        b1hi = rhi(s6lo, s6hi, 44u);
+        b11lo = rlo(s7lo, s7hi, 6u);
+        b11hi = rhi(s7lo, s7hi, 6u);
+        b21lo = rlo(s8lo, s8hi, 55u);
+        b21hi = rhi(s8lo, s8hi, 55u);
+        b6lo = rlo(s9lo, s9hi, 20u);
+        b6hi = rhi(s9lo, s9hi, 20u);
+
+        b7lo = rlo(s10lo, s10hi, 3u);
+        b7hi = rhi(s10lo, s10hi, 3u);
+        b17lo = rlo(s11lo, s11hi, 10u);
+        b17hi = rhi(s11lo, s11hi, 10u);
+        b2lo = rlo(s12lo, s12hi, 43u);
+        b2hi = rhi(s12lo, s12hi, 43u);
+        b12lo = rlo(s13lo, s13hi, 25u);
+        b12hi = rhi(s13lo, s13hi, 25u);
+        b22lo = rlo(s14lo, s14hi, 39u);
+        b22hi = rhi(s14lo, s14hi, 39u);
+
+        b23lo = rlo(s15lo, s15hi, 41u);
+        b23hi = rhi(s15lo, s15hi, 41u);
+        b8lo = rlo(s16lo, s16hi, 45u);
+        b8hi = rhi(s16lo, s16hi, 45u);
+        b18lo = rlo(s17lo, s17hi, 15u);
+        b18hi = rhi(s17lo, s17hi, 15u);
+        b3lo = rlo(s18lo, s18hi, 21u);
+        b3hi = rhi(s18lo, s18hi, 21u);
+        b13lo = rlo(s19lo, s19hi, 8u);
+        b13hi = rhi(s19lo, s19hi, 8u);
+
+        b14lo = rlo(s20lo, s20hi, 18u);
+        b14hi = rhi(s20lo, s20hi, 18u);
+        b24lo = rlo(s21lo, s21hi, 2u);
+        b24hi = rhi(s21lo, s21hi, 2u);
+        b9lo = rlo(s22lo, s22hi, 61u);
+        b9hi = rhi(s22lo, s22hi, 61u);
+        b19lo = rlo(s23lo, s23hi, 56u);
+        b19hi = rhi(s23lo, s23hi, 56u);
+        b4lo = rlo(s24lo, s24hi, 14u);
+        b4hi = rhi(s24lo, s24hi, 14u);
+
+        // ── χ step ────────────────────────────────────────────────────────────
+        // A[i] = B[i] ^ (~B[i+1 in row] & B[i+2 in row])
+        s0lo = b0lo ^ (~b1lo & b2lo);
+        s0hi = b0hi ^ (~b1hi & b2hi);
+        s1lo = b1lo ^ (~b2lo & b3lo);
+        s1hi = b1hi ^ (~b2hi & b3hi);
+        s2lo = b2lo ^ (~b3lo & b4lo);
+        s2hi = b2hi ^ (~b3hi & b4hi);
+        s3lo = b3lo ^ (~b4lo & b0lo);
+        s3hi = b3hi ^ (~b4hi & b0hi);
+        s4lo = b4lo ^ (~b0lo & b1lo);
+        s4hi = b4hi ^ (~b0hi & b1hi);
+
+        s5lo = b5lo ^ (~b6lo & b7lo);
+        s5hi = b5hi ^ (~b6hi & b7hi);
+        s6lo = b6lo ^ (~b7lo & b8lo);
+        s6hi = b6hi ^ (~b7hi & b8hi);
+        s7lo = b7lo ^ (~b8lo & b9lo);
+        s7hi = b7hi ^ (~b8hi & b9hi);
+        s8lo = b8lo ^ (~b9lo & b5lo);
+        s8hi = b8hi ^ (~b9hi & b5hi);
+        s9lo = b9lo ^ (~b5lo & b6lo);
+        s9hi = b9hi ^ (~b5hi & b6hi);
+
+        s10lo = b10lo ^ (~b11lo & b12lo);
+        s10hi = b10hi ^ (~b11hi & b12hi);
+        s11lo = b11lo ^ (~b12lo & b13lo);
+        s11hi = b11hi ^ (~b12hi & b13hi);
+        s12lo = b12lo ^ (~b13lo & b14lo);
+        s12hi = b12hi ^ (~b13hi & b14hi);
+        s13lo = b13lo ^ (~b14lo & b10lo);
+        s13hi = b13hi ^ (~b14hi & b10hi);
+        s14lo = b14lo ^ (~b10lo & b11lo);
+        s14hi = b14hi ^ (~b10hi & b11hi);
+
+        s15lo = b15lo ^ (~b16lo & b17lo);
+        s15hi = b15hi ^ (~b16hi & b17hi);
+        s16lo = b16lo ^ (~b17lo & b18lo);
+        s16hi = b16hi ^ (~b17hi & b18hi);
+        s17lo = b17lo ^ (~b18lo & b19lo);
+        s17hi = b17hi ^ (~b18hi & b19hi);
+        s18lo = b18lo ^ (~b19lo & b15lo);
+        s18hi = b18hi ^ (~b19hi & b15hi);
+        s19lo = b19lo ^ (~b15lo & b16lo);
+        s19hi = b19hi ^ (~b15hi & b16hi);
+
+        s20lo = b20lo ^ (~b21lo & b22lo);
+        s20hi = b20hi ^ (~b21hi & b22hi);
+        s21lo = b21lo ^ (~b22lo & b23lo);
+        s21hi = b21hi ^ (~b22hi & b23hi);
+        s22lo = b22lo ^ (~b23lo & b24lo);
+        s22hi = b22hi ^ (~b23hi & b24hi);
+        s23lo = b23lo ^ (~b24lo & b20lo);
+        s23hi = b23hi ^ (~b24hi & b20hi);
+        s24lo = b24lo ^ (~b20lo & b21lo);
+        s24hi = b24hi ^ (~b20hi & b21hi);
+
+        // ── ι step ────────────────────────────────────────────────────────────
+        s0lo ^= RC_LO[r];
+        s0hi ^= RC_HI[r];
+    }
+
+    // ── Squeeze: lanes 0-3 → 32-byte digest, output as BE u32 words ──────────
+    uint o0 = bs(s0lo);
+    uint o1 = bs(s0hi);
+    uint o2 = bs(s1lo);
+    uint o3 = bs(s1hi);
+    uint o4 = bs(s2lo);
+    uint o5 = bs(s2hi);
+    uint o6 = bs(s3lo);
+    uint o7 = bs(s3hi);
+
+    // ── Compare digest < target (big-endian word-by-word) ─────────────────────
+    bool win = false;
+    if (o0 < pc.tg0) win = true;
+    else if (o0 > pc.tg0) win = false;
+    else if (o1 < pc.tg1) win = true;
+    else if (o1 > pc.tg1) win = false;
+    else if (o2 < pc.tg2) win = true;
+    else if (o2 > pc.tg2) win = false;
+    else if (o3 < pc.tg3) win = true;
+    else if (o3 > pc.tg3) win = false;
+    else if (o4 < pc.tg4) win = true;
+    else if (o4 > pc.tg4) win = false;
+    else if (o5 < pc.tg5) win = true;
+    else if (o5 > pc.tg5) win = false;
+    else if (o6 < pc.tg6) win = true;
+    else if (o6 > pc.tg6) win = false;
+    else if (o7 < pc.tg7) win = true;
+
+    if (win) {
+        if (atomicCompSwap(found, 0u, 1u) == 0u) {
+            nonce_lo = nlo;
+            nonce_hi = nhi;
+            d[0] = o0;
+            d[1] = o1;
+            d[2] = o2;
+            d[3] = o3;
+            d[4] = o4;
+            d[5] = o5;
+            d[6] = o6;
+            d[7] = o7;
+        }
+    }
+}
