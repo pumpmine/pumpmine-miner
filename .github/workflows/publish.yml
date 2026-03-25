@@ -41,14 +41,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
