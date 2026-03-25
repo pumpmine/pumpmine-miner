@@ -28,7 +28,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             use-cross: true
 
-          # Windows (DO NOT TOUCH shaderc here)
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
@@ -48,37 +48,26 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------
-      # Install shaderc (Linux + macOS ONLY)
+      # Install shaderc (ALL platforms)
       # ---------------------------
 
-      - name: Install dependencies (Linux)
+      - name: Install shaderc (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git \
-            cmake \
-            ninja-build \
-            build-essential \
-            python3
+          sudo apt-get install -y shaderc
 
-      - name: Build shaderc (Linux/macOS)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Install shaderc (macOS)
+        if: runner.os == 'macOS'
         run: |
-          git clone https://github.com/google/shaderc.git
-          cd shaderc
+          brew update
+          brew install shaderc
 
-          ./utils/git-sync-deps
-
-          mkdir build
-          cd build
-
-          cmake -GNinja -DCMAKE_BUILD_TYPE=Release ..
-          ninja
-
-          echo "SHADERC_LIB_DIR=$PWD/libshaderc" >> $GITHUB_ENV
-          echo "SHADERC_INCLUDE_DIR=$(pwd)/../libshaderc/include" >> $GITHUB_ENV
+      - name: Install shaderc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install shaderc -y
 
       # ---------------------------
       # Rust toolchain
@@ -90,7 +79,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       # ---------------------------
-      # Cross (Linux ARM only)
+      # Cross for ARM Linux
       # ---------------------------
 
       - name: Install cross
@@ -145,7 +134,7 @@ jobs:
           path: dist/*
 
   release:
-    name: Release
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
 
@@ -155,7 +144,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
