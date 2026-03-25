@@ -19,22 +19,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux deps
+      - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y cmake ninja-build python3 libvulkan-dev
 
-      - name: Install macOS deps
+      - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja python@3
+        run: |
+          brew install cmake ninja python@3 glslang shaderc
 
-      - name: Install Vulkan SDK (Windows + macOS)
-        if: runner.os != 'Linux'
-        uses: humbletim/install-vulkan-sdk@v1.1.1
-        with:
-          version: latest
-          cache: false   # disable built-in cache — it uses deprecated actions/cache@v2
+      - name: Install deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install cmake ninja python3 --yes
+          # Install glslang + shaderc via winget or grab prebuilt shaderc
+          $url = "https://storage.googleapis.com/shaderc/artifacts/prod/graphics_shader_compiler/shaderc/windows/continuous_release_2017/407/20240105-094918/install.zip"
+          Invoke-WebRequest $url -OutFile shaderc.zip
+          Expand-Archive shaderc.zip -DestinationPath C:\shaderc
+          echo "SHADERC_LIB_DIR=C:\shaderc\lib" >> $env:GITHUB_ENV
+          echo "C:\shaderc\bin" >> $env:GITHUB_PATH
 
       - uses: dtolnay/rust-toolchain@stable
         with:
