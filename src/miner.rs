@@ -99,7 +99,7 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
     println!("[GPU] Using batch size {batch_size}");
 
     // ── Provider / contract ───────────────────────────────────────────────────
-    let rpc = "https://sepolia.base.org".parse().unwrap();
+    let rpc = "https://mainnet.base.org".parse().unwrap();
     let signer: PrivateKeySigner = config.private_key.parse().expect("Invalid private key");
     let provider = Arc::new(
         ProviderBuilder::new()
