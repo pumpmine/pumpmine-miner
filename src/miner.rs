@@ -188,7 +188,7 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
         let new_job_flag = new_job_flag.clone();
         let token_sym = token_symbol.clone();
         let token2 = PumpmineToken::new(config.token_address, provider.clone());
-        let interval = config.refresh_interval.unwrap_or(5) as u64;
+        let interval = config.refresh_interval.unwrap_or(10) as u64;
 
         tokio::spawn(async move {
             let mut last_challenge = { shared_job.read().await.challenge };
