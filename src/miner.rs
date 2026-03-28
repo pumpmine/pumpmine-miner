@@ -10,8 +10,11 @@ use std::{
 use alloy::{
     hex,
     network::EthereumWallet,
-    primitives::{utils::format_units, U256},
-    providers::ProviderBuilder,
+    primitives::{
+        utils::{format_ether, format_units},
+        U256,
+    },
+    providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
 
@@ -108,6 +111,18 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
     );
     let token = PumpmineToken::new(config.token_address, &provider);
 
+    let miner_balance = provider.get_balance(signer.address()).await.unwrap_or_default();
+    
+    println!("[MINER] Loaded miner wallet\n[MINER]  Address: {} (please make sure this is your public wallet address)\n[MINER]  Balance: {} ETH",
+        signer.address(),
+        format_ether(miner_balance)
+    );
+    
+    if miner_balance == 0 {
+        eprintln!("[MINER] Error: your miner wallet does not have enough Base ETH to fund submission gas!");
+        return;
+    }
+
     let token_symbol = token
         .symbol()
         .call()
@@ -135,7 +150,7 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
         format_units(info._totalMined, 18).unwrap(),
         info._difficulty,
     );
-    
+
     if info._blocksRemaining <= 0 {
         eprintln!("Emission for {token_name} has ended.");
         return;

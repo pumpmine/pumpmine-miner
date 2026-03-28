@@ -5,8 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let src = fs::read_to_string("shaders/keccak.comp")
-        .expect("missing shaders/keccak.comp");
+    let src = fs::read_to_string("shaders/keccak.comp").expect("missing shaders/keccak.comp");
 
     let compiler = shaderc::Compiler::new().unwrap();
     let mut opts = shaderc::CompileOptions::new().unwrap();
@@ -17,7 +16,13 @@ fn main() {
     );
 
     let artifact = compiler
-        .compile_into_spirv(&src, shaderc::ShaderKind::Compute, "keccak.comp", "main", Some(&opts))
+        .compile_into_spirv(
+            &src,
+            shaderc::ShaderKind::Compute,
+            "keccak.comp",
+            "main",
+            Some(&opts),
+        )
         .expect("shader compile failed");
 
     fs::write(out_dir.join("keccak.spv"), artifact.as_binary_u8()).unwrap();
