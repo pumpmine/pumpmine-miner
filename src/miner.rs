@@ -102,7 +102,7 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
     println!("[GPU] Using batch size {batch_size}");
 
     // ── Provider / contract ───────────────────────────────────────────────────
-    let rpc = "https://mainnet.base.org".parse().unwrap();
+    let rpc = config.rpc.clone().unwrap_or("https://base.drpc.org".to_string()).parse().unwrap();
     let signer: PrivateKeySigner = config.private_key.parse().expect("Invalid private key");
     let provider = Arc::new(
         ProviderBuilder::new()
@@ -178,6 +178,7 @@ pub async fn miner(gpu: Arc<Gpu>, config: &MinerConfig) {
     // ── Hashrate reporter (tokio task) ────────────────────────────────────────
     {
         let hashes_done = hashes_done.clone();
+        // 5s default refresh interval
         let interval = config.refresh_interval.unwrap_or(5) as u64;
         tokio::spawn(async move {
             let mut prev: u64 = 0;

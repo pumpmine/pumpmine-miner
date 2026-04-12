@@ -8,6 +8,7 @@ pub struct MinerConfig {
     pub token_address: Address,
     pub batch_size: Option<u32>,
     pub refresh_interval: Option<u32>,
+    pub rpc: Option<String>,
 }
 
 impl Default for MinerConfig {
@@ -17,7 +18,8 @@ impl Default for MinerConfig {
                 .to_string(),
             token_address: address!("0x0000000000000000000000000000000000000000"),
             batch_size: None,
-            refresh_interval: Some(3),
+            refresh_interval: None,
+            rpc: None
         }
     }
 }
